@@ -177,7 +177,8 @@ def add_slide_content(slide, slide_data):
 
     slide_type = slide_data.get("type", "content")
     title = slide_data.get("title", "")
-    content_list = slide_data.get("content", [])
+    content_format = slide_data.get("format", "bullets")  # NEW: Get format type
+    content = slide_data.get("content", [])
 
     # Get ALL text shapes in order
     text_shapes = [shape for shape in slide.shapes if shape.has_text_frame]
@@ -190,10 +191,13 @@ def add_slide_content(slide, slide_data):
             p = text_shapes[0].text_frame.paragraphs[0]
             p.text = title
 
-        if len(text_shapes) >= 2 and content_list:
+        if len(text_shapes) >= 2 and content:
             # Update second shape (subtitle)
             p = text_shapes[1].text_frame.paragraphs[0]
-            p.text = content_list[0]
+            if content_format == "paragraph":
+                p.text = content  # Single string for paragraph
+            else:
+                p.text = content[0]  # First item for bullets
 
     else:  # content slide
         # Content slide
@@ -214,18 +218,25 @@ def add_slide_content(slide, slide_data):
                 # Remove from XML
                 p_element.getparent().remove(p_element)
 
-            # Now update/add bullets
-            for i, bullet in enumerate(content_list):
-                if i == 0:
-                    # Update first paragraph (already exists)
-                    p = content_frame.paragraphs[0]
-                    p.text = bullet
-                else:
-                    # Add new paragraph
-                    p = content_frame.add_paragraph()
-                    p.text = bullet
-
+            # NEW: Handle based on format type
+            if content_format == "paragraph":
+                # Single paragraph content
+                p = content_frame.paragraphs[0]
+                p.text = content  # content is a string
                 p.level = 0
+            else:  # bullets format
+                # Multiple bullet points (content is array)
+                for i, bullet in enumerate(content):
+                    if i == 0:
+                        # Update first paragraph (already exists)
+                        p = content_frame.paragraphs[0]
+                        p.text = bullet
+                    else:
+                        # Add new paragraph
+                        p = content_frame.add_paragraph()
+                        p.text = bullet
+
+                    p.level = 0
 
 
 def debug_slide(slide):
