@@ -78,6 +78,7 @@ class Slide(BaseModel):
     slideNumber: int
     title: str
     type: str
+    format: str
     content: List[str]
 
 
