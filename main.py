@@ -2,13 +2,24 @@ import os
 import time
 from typing import List
 
+import redis
 from fastapi import FastAPI, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pptx import Presentation
-from pptx.util import Pt
+from fastapi import Request
+from pptx.dml.color import RGBColor
+from pptx.enum.text import PP_ALIGN
+from pptx.util import Pt, Inches
+import hashlib
 from pydantic import BaseModel
+from starlette.responses import JSONResponse
+
+# Redis connection
+r = redis.from_url(os.getenv("REDIS_URL"))
+
+FREE_LIMIT = 3
 
 app = FastAPI()
 
@@ -18,6 +29,45 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"]
 )
+
+
+def create_guest_id(request: Request) -> str:
+    """Fingerprint = IP + User-Agent (privacy-safe)"""
+    ip = request.client.host.replace("::ffff:", "")
+    ua = request.headers.get("user-agent", "")[:100]
+    fingerprint = f"{ip}:{ua}"
+    return hashlib.md5(fingerprint.encode()).hexdigest()
+
+
+@app.middleware("http")
+async def guest_limiter(request: Request, call_next):
+    if request.url.path == "/api/generate-pptx" and request.method == "POST":
+        guest_id = create_guest_id(request)
+        key = f"guest:{guest_id}"
+
+        # Track usage
+        count = r.incr(key)
+        r.expire(key, 2592000)  # 30 days
+
+        # Store in request state for PPT generation
+        request.state.guest_count = count
+        request.state.guest_id = guest_id
+
+        if count > FREE_LIMIT:
+            return JSONResponse(
+                status_code=402,
+                content={
+                    "status": "limit_reached",
+                    "used": count,
+                    "limit": FREE_LIMIT,
+                    "guest_id": guest_id,
+                    "upgrade_url": "/upgrade",
+                    "message": "You've created 3 amazing presentations!"
+                }
+            )
+
+    response = await call_next(request)
+    return response
 
 
 @app.get("/api/templates")
@@ -89,8 +139,12 @@ class SlidesRequest(BaseModel):
 
 
 @app.post("/api/generate-pptx")
-async def generate_pptx(request: SlidesRequest = Body(...)):
+async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request = None):
     try:
+        # Get guest info from middleware (if exists)
+        guest_count = getattr(request_obj.state, 'guest_count', 0) if request_obj else 0
+        is_guest = not request.headers.get("authorization") if request_obj else True
+
         slides_data = request.dict()
         template_id = slides_data.get("templateId")
 
@@ -132,15 +186,43 @@ async def generate_pptx(request: SlidesRequest = Body(...)):
         # Then delete slide at index 0
         del r_id_list[0]
 
+        # Add watermark for free users (PPT #3+)
+        if is_guest and guest_count >= 3:
+            add_watermark(prs, "Made with Voice-to-PPT Free")
+
         filename = f"presentation-{template_id}-{int(time.time())}.pptx"
         os.makedirs("presentations", exist_ok=True)
         output_path = f"presentations/{filename}"
         prs.save(output_path)
 
-        return {"status": "success", "downloadUrl": f"/download/{filename}"}
+        return {
+            "status": "success",
+            "downloadUrl": f"/download/{filename}",
+            "is_guest": is_guest,
+            "guest_count": guest_count,
+            "show_upgrade": is_guest and guest_count >= 3,
+            "watermark": is_guest and guest_count >= 3
+        }
 
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+def add_watermark(prs, text: str):
+    """Add subtle watermark to all slides for free users"""
+    for slide in prs.slides:
+        left = Inches(0.5)
+        top = Inches(6.5)
+        width = Inches(7)
+        height = Inches(0.5)
+
+        txBox = slide.shapes.add_textbox(left, top, width, height)
+        tf = txBox.text_frame
+        p = tf.paragraphs[0]
+        p.text = text
+        p.font.size = Pt(12)
+        p.font.color.rgb = RGBColor(0xF5, 0xA6, 0x23)  # Gold color
+        p.alignment = PP_ALIGN.CENTER
 
 
 def get_correct_layout(prs, slide_type):
@@ -270,8 +352,10 @@ async def download_presentation(filename: str):
         media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation"
     )
 
+
 app.mount("/thumbnails", StaticFiles(directory="thumbnails"), name="thumbnails")
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)  # ← host="0.0.0.0"
