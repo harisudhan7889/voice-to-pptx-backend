@@ -16,9 +16,6 @@ import hashlib
 from pydantic import BaseModel
 from starlette.responses import JSONResponse
 
-# Redis connection
-r = redis.from_url(os.getenv("REDIS_URL"))
-
 FREE_LIMIT = 3
 
 app = FastAPI()
@@ -31,6 +28,26 @@ app.add_middleware(
 )
 
 
+def get_redis_client() -> redis.Redis | None:
+    url = os.getenv("REDIS_URL")
+    if not url:
+        print("REDIS_URL not set, guest limiting disabled")
+        return None
+    try:
+        client = redis.from_url(url)
+        # Light ping to validate connection
+        client.ping()
+        print("Connected to Redis successfully")
+        return client
+    except Exception as e:
+        print(f"Redis connection failed: {e}")
+        return None
+
+
+# Redis connection
+r = get_redis_client()
+
+
 def create_guest_id(request: Request) -> str:
     """Fingerprint = IP + User-Agent (privacy-safe)"""
     ip = request.client.host.replace("::ffff:", "")
@@ -41,6 +58,10 @@ def create_guest_id(request: Request) -> str:
 
 @app.middleware("http")
 async def guest_limiter(request: Request, call_next):
+    # If Redis not available, skip limiting (but app still works)
+    if r is None:
+        return await call_next(request)
+
     if request.url.path == "/api/generate-pptx" and request.method == "POST":
         guest_id = create_guest_id(request)
         key = f"guest:{guest_id}"
