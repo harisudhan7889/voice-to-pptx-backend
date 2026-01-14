@@ -181,6 +181,8 @@ def add_slide_content(slide, slide_data):
     content_format = slide_data.get("format", "bullets")  # NEW: Get format type
     content = slide_data.get("content", [])
 
+    print(f" - Content: {content_format}")
+
     # Get ALL text shapes in order
     text_shapes = [shape for shape in slide.shapes if shape.has_text_frame]
     text_shapes.sort(key=lambda s: s.top)
@@ -196,7 +198,7 @@ def add_slide_content(slide, slide_data):
             # Update second shape (subtitle)
             p = text_shapes[1].text_frame.paragraphs[0]
             if content_format == "paragraph":
-                p.text = content  # Single string for paragraph
+                p.text = content[0]  # Single string for paragraph
             else:
                 p.text = content[0]  # First item for bullets
 
@@ -223,7 +225,7 @@ def add_slide_content(slide, slide_data):
             if content_format == "paragraph":
                 # Single paragraph content
                 p = content_frame.paragraphs[0]
-                p.text = content  # content is a string
+                p.text = content[0]  # content is a string
                 p.level = 0
             else:  # bullets format
                 # Multiple bullet points (content is array)
