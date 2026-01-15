@@ -169,6 +169,8 @@ async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request
         slides_data = request.dict()
         template_id = slides_data.get("templateId")
 
+        print(f" - Guest count: {guest_count}")
+
         template_files = {
             "geometric": "templates/geometric.pptx",
             "streamline": "templates/streamline.pptx",
