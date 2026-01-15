@@ -164,7 +164,7 @@ async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request
     try:
         # Get guest info from middleware (if exists)
         guest_count = getattr(request_obj.state, 'guest_count', 0) if request_obj else 0
-        is_guest = not request.headers.get("authorization") if request_obj else True
+        is_guest = not request_obj.headers.get("authorization") if request_obj else True
 
         slides_data = request.dict()
         template_id = slides_data.get("templateId")
