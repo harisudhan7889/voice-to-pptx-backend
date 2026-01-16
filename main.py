@@ -91,35 +91,6 @@ def create_guest_id(request: Request) -> str:
 #     response = await call_next(request)
 #     return response
 
-@app.middleware("http")
-async def pro_guest_limiter(request: Request, call_next):
-    if r is None:
-        return await call_next(request)
-
-    # THIS LINE = Only runs for YOUR endpoint
-    if request.url.path == "/api/generate-pptx" and request.method == "POST":
-        # Pro check + Guest logic ONLY here
-        rc_user_id = request.headers.get("X-RC-App-User-ID")
-        if rc_user_id and r.exists(f"pro:{rc_user_id}"):
-            request.state.is_pro = True
-            print(f"✅ Pro user: {rc_user_id}")
-            response = await call_next(request)
-            return response
-
-        # Your existing guest logic (unchanged)
-        guest_id = create_guest_id(request)
-        key = f"guest:{guest_id}"
-        count = r.incr(key)
-        r.expire(key, 2592000)
-        request.state.guest_count = count
-        request.state.guest_id = guest_id
-
-        if count > FREE_LIMIT:
-            return JSONResponse(status_code=402, content={...})
-
-    # ALL OTHER endpoints = Skip middleware (immediate return)
-    response = await call_next(request)
-    return response
 
 @app.get("/api/templates")
 async def get_templates():
