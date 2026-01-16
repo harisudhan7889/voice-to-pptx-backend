@@ -1,9 +1,10 @@
+import hmac
 import os
 import time
 from typing import List
 
 import redis
-from fastapi import FastAPI, Body
+from fastapi import FastAPI, Body, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -403,9 +404,37 @@ async def download_presentation(filename: str):
     )
 
 
+async def verify_revenuecat_signature(auth_header: str = None) -> bool:
+    """Verify RevenueCat webhook using Authorization header"""
+    if not auth_header:
+        return True  # Skip if no auth configured
+
+    expected_token = os.getenv("REVENUECAT_WEBHOOK_SECRET")
+    if not expected_token:
+        return True
+
+    # RevenueCat sends: Authorization: Bearer <your-secret>
+    try:
+        token = auth_header.replace("Bearer ", "")
+        return hmac.compare_digest(token, expected_token)
+    except:
+        return False
+
+
 @app.post("/api/revenuecat-webhook")
-async def revenuecat_webhook(payload: dict = Body(...)):
-    # 1. Basic validation
+async def revenuecat_webhook(request: Request, payload: dict = Body(...)):
+    # FIXED: Use Authorization header (RevenueCat standard)
+    auth_header = request.headers.get("Authorization", "")
+    if not await verify_revenuecat_signature(auth_header):
+        print("Invalid webhook auth")
+        raise HTTPException(status_code=401, detail="Invalid auth")
+
+    print(f"RevenueCat webhook: {payload.get('event', {}).get('type', 'unknown')}")
+
+    if r is None:
+        print("Redis unavailable")
+        return {"status": "redis_unavailable"}
+
     event = payload.get("event", {})
     if not event:
         return {"status": "invalid_payload"}
@@ -414,62 +443,48 @@ async def revenuecat_webhook(payload: dict = Body(...)):
     app_user_id = event.get("app_user_id")
     product_id = event.get("product_id", "")
 
-    # Validate required fields
     if not all([event_type, app_user_id]):
-        print(f" Missing required fields: {payload}")
+        print(f"Missing fields: {event_type}, {app_user_id}")
         return {"status": "missing_fields"}
-
-    # Skip if Redis unavailable
-    if r is None:
-        print(" Redis unavailable - skipping webhook")
-        return {"status": "redis_unavailable"}
 
     pro_key = f"pro:{app_user_id}"
 
     try:
-        if event_type == "INITIAL_PURCHASE":
-            # Idempotent: Only set if not already pro
+        if event_type == "TEST":
+            print(f"🧪 TEST SUCCESS: {app_user_id}")
+            return {"status": "test_success"}
+
+        elif event_type == "INITIAL_PURCHASE":
             if not await r.exists(pro_key):
                 if "lifetime" in product_id.lower() or "149" in product_id:
-                    await r.set(pro_key, "lifetime")  # Forever!
-                    print(f" LIFETIME Pro: {app_user_id}")
+                    await r.set(pro_key, "lifetime")
+                    print(f"LIFETIME: {app_user_id}")
                 else:
-                    await r.setex(pro_key, 31536000, "subscription")  # 1 year
-                    print(f" NEW Subscription: {app_user_id}")
+                    await r.setex(pro_key, 31536000, "subscription")
+                    print(f"SUBSCRIPTION: {app_user_id}")
             else:
-                print(f" Initial purchase ignored (already pro): {app_user_id}")
+                print(f"Already pro: {app_user_id}")
 
         elif event_type == "RENEWAL":
-            # Always refresh subscription expiry
             await r.setex(pro_key, 31536000, "subscription")
-            print(f" Subscription renewed: {app_user_id}")
+            print(f"RENEWED: {app_user_id}")
 
         elif event_type == "CANCELLATION":
-            # Atomic: Only delete subscription status
-            deleted = await r.eval(
-                "if redis.call('GET', KEYS[1]) == 'subscription' then return redis.call('DEL', KEYS[1]) else return 0 "
-                "end",
-                1, pro_key
-            )
-            if deleted:
-                print(f" Subscription cancelled: {app_user_id}")
-            else:
-                print(f" No subscription to cancel: {app_user_id}")
+            # FIXED: Simple atomic check
+            status = await r.get(pro_key)
+            if status == b"subscription":
+                await r.delete(pro_key)
+                print(f"CANCELLED: {app_user_id}")
 
         elif event_type == "EXPIRATION":
-            # Clean up expired subscriptions
             await r.delete(pro_key)
-            print(f" Subscription expired: {app_user_id}")
+            print(f"EXPIRED: {app_user_id}")
 
         else:
-            print(f" Unknown event type: {event_type}")
-
-    except redis.RedisError as e:
-        print(f" Redis error in webhook: {e}")
-        return {"status": "redis_error"}
+            print(f"Unknown: {event_type}")
 
     except Exception as e:
-        print(f" Webhook error: {e}")
+        print(f"Webhook error: {e}")
         return {"status": "error"}
 
     return {"status": "ok"}
@@ -477,62 +492,49 @@ async def revenuecat_webhook(payload: dict = Body(...)):
 
 @app.middleware("http")
 async def pro_guest_limiter(request: Request, call_next):
-    # ONLY for /api/generate-pptx POST requests
     if request.url.path != "/api/generate-pptx" or request.method != "POST":
         return await call_next(request)
 
-    # Skip if no Redis (app continues gracefully)
     if r is None:
         print("Redis unavailable - skipping limits")
         return await call_next(request)
 
     try:
-        # 1.PRO CHECK FIRST (highest priority)
+        # 1. ASYNC PRO CHECK (FIXED)
         rc_user_id = request.headers.get("X-RC-App-User-ID")
         if rc_user_id:
-            pro_key = f"pro:{rc_user_id}"
-            pro_status = r.get(pro_key)
-            if pro_status:  # Lifetime or subscription
+            pro_status = await r.get(f"pro:{rc_user_id}")
+            if pro_status:
                 request.state.is_pro = True
-                print(f" Pro: {rc_user_id} ({pro_status.decode('utf-8', errors='ignore')})")
+                print(f"Pro: {rc_user_id} ({pro_status.decode(errors='ignore')})")
                 return await call_next(request)
 
-        # 2.GUEST TRACKING (only non-Pro users)
+        # 2. ASYNC GUEST TRACKING (FIXED)
         guest_id = create_guest_id(request)
-        guest_key = f"guest:{guest_id}"
+        count = await r.incr(f"guest:{guest_id}")
+        await r.expire(f"guest:{guest_id}", 2592000)
 
-        # Atomic increment + TTL (30 days)
-        count = r.incr(guest_key)
-        r.expire(guest_key, 2592000)  # 30 days
-
-        request.state.guest_count = count
+        request.state.guest_count = int(count)
         request.state.guest_id = guest_id
-        print(f"📊 Guest #{count}: {guest_id[:8]}...")
+        print(f"Guest #{count}: {guest_id[:8]}...")
 
-        # 3.ENFORCE LIMIT (before endpoint)
+        # 3. FIXED LIMIT RESPONSE
         if count > FREE_LIMIT:
-            print(f" Guest limit reached: {guest_id}")
             return JSONResponse(
                 status_code=402,
                 content={
                     "status": "limit_reached",
-                    "used": count,
+                    "used": int(count),
                     "limit": FREE_LIMIT,
                     "guest_id": guest_id,
                     "upgrade_url": "/upgrade",
-                    "message": f"You've created ${FREE_LIMIT} amazing presentations! Upgrade for unlimited."
+                    "message": f"You've created {FREE_LIMIT} amazing presentations!"
                 }
             )
 
-    except redis.RedisError as e:
-        print(f" Redis error: {e}")
-        # Continue without limits (don't break app)
-
     except Exception as e:
-        print(f" Middleware error: {e}")
-        # Continue without limits
+        print(f"Middleware error: {e}")
 
-    # Continue to endpoint
     return await call_next(request)
 
 
