@@ -56,40 +56,69 @@ def create_guest_id(request: Request) -> str:
     return hashlib.md5(fingerprint.encode()).hexdigest()
 
 
+# @app.middleware("http")
+# async def guest_limiter(request: Request, call_next):
+#     # If Redis not available, skip limiting (but app still works)
+#     if r is None:
+#         return await call_next(request)
+#
+#     if request.url.path == "/api/generate-pptx" and request.method == "POST":
+#         guest_id = create_guest_id(request)
+#         key = f"guest:{guest_id}"
+#
+#         # Track usage
+#         count = r.incr(key)
+#         r.expire(key, 2592000)  # 30 days
+#
+#         # Store in request state for PPT generation
+#         request.state.guest_count = count
+#         request.state.guest_id = guest_id
+#
+#         if count > FREE_LIMIT:
+#             return JSONResponse(
+#                 status_code=402,
+#                 content={
+#                     "status": "limit_reached",
+#                     "used": count,
+#                     "limit": FREE_LIMIT,
+#                     "guest_id": guest_id,
+#                     "upgrade_url": "/upgrade",
+#                     "message": "You've created 3 amazing presentations!"
+#                 }
+#             )
+#
+#     response = await call_next(request)
+#     return response
+
 @app.middleware("http")
-async def guest_limiter(request: Request, call_next):
-    # If Redis not available, skip limiting (but app still works)
+async def pro_guest_limiter(request: Request, call_next):
     if r is None:
         return await call_next(request)
 
+    # THIS LINE = Only runs for YOUR endpoint
     if request.url.path == "/api/generate-pptx" and request.method == "POST":
+        # Pro check + Guest logic ONLY here
+        rc_user_id = request.headers.get("X-RC-App-User-ID")
+        if rc_user_id and r.exists(f"pro:{rc_user_id}"):
+            request.state.is_pro = True
+            print(f"✅ Pro user: {rc_user_id}")
+            response = await call_next(request)
+            return response
+
+        # Your existing guest logic (unchanged)
         guest_id = create_guest_id(request)
         key = f"guest:{guest_id}"
-
-        # Track usage
         count = r.incr(key)
-        r.expire(key, 2592000)  # 30 days
-
-        # Store in request state for PPT generation
+        r.expire(key, 2592000)
         request.state.guest_count = count
         request.state.guest_id = guest_id
 
         if count > FREE_LIMIT:
-            return JSONResponse(
-                status_code=402,
-                content={
-                    "status": "limit_reached",
-                    "used": count,
-                    "limit": FREE_LIMIT,
-                    "guest_id": guest_id,
-                    "upgrade_url": "/upgrade",
-                    "message": "You've created 3 amazing presentations!"
-                }
-            )
+            return JSONResponse(status_code=402, content={...})
 
+    # ALL OTHER endpoints = Skip middleware (immediate return)
     response = await call_next(request)
     return response
-
 
 @app.get("/api/templates")
 async def get_templates():
@@ -162,14 +191,24 @@ class SlidesRequest(BaseModel):
 @app.post("/api/generate-pptx")
 async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request = None):
     try:
-        # Get guest info from middleware (if exists)
-        guest_count = getattr(request_obj.state, 'guest_count', 0) if request_obj else 0
-        is_guest = not request_obj.headers.get("authorization") if request_obj else True
+        # NEW: Check Pro status FIRST (middleware sets this)
+        is_pro = getattr(request_obj.state, 'is_pro', False) if request_obj else False
+
+        # Get guest info from middleware (if exists and NOT pro)
+        guest_count = getattr(request_obj.state, 'guest_count', 0) if request_obj and not is_pro else 0
+        is_guest = not is_pro and (not request_obj or not request_obj.headers.get("authorization"))
 
         slides_data = request.dict()
         template_id = slides_data.get("templateId")
 
-        print(f" - Guest count: {guest_count}")
+        print(f" - Pro: {is_pro}, Guest count: {guest_count}")
+
+        # Pro users = NO watermark, NO limits
+        if is_pro:
+            print("Pro user - Unlimited access")
+        # Free users = watermark on #3+
+        elif is_guest and guest_count >= FREE_LIMIT:
+            print("Free user - Watermark added")
 
         template_files = {
             "geometric": "templates/geometric.pptx",
@@ -183,34 +222,21 @@ async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request
         template_path = template_files.get(template_id, template_files["slate"])
 
         prs = Presentation(template_path)
-
-        # Get template slides
-        title_template = prs.slides[0]  # First slide = title template
-        content_template = prs.slides[1]  # Second slide = content template
+        title_template = prs.slides[0]
+        content_template = prs.slides[1]
 
         for slide_data in slides_data["slides"]:
             slide_type = slide_data.get("type", "content")
-
-            # Choose correct template slide
-            if slide_type == "title":
-                template = title_template
-            else:
-                template = content_template
-
-            # Use template's layout (SAFE)
+            template = title_template if slide_type == "title" else content_template
             slide = prs.slides.add_slide(template.slide_layout)
             add_slide_content(slide, slide_data)
 
         r_id_list = prs.slides._sldIdLst
-
-        # Delete slide at index 1 first (to avoid index shift)
         del r_id_list[1]
-
-        # Then delete slide at index 0
         del r_id_list[0]
 
-        # Add watermark for free users (PPT #3+)
-        if is_guest and guest_count >= 3:
+        # Watermark ONLY for free users (PPT #3+), NEVER for Pro
+        if is_guest and guest_count >= FREE_LIMIT:
             add_watermark(prs, "Made with Voice-to-PPT Free")
 
         filename = f"presentation-{template_id}-{int(time.time())}.pptx"
@@ -221,10 +247,11 @@ async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request
         return {
             "status": "success",
             "downloadUrl": f"/download/{filename}",
+            "is_pro": is_pro,
             "is_guest": is_guest,
             "guest_count": guest_count,
-            "show_upgrade": is_guest and guest_count >= 3,
-            "watermark": is_guest and guest_count >= 3
+            "show_upgrade": is_guest and guest_count >= FREE_LIMIT,
+            "watermark": is_guest and guest_count >= FREE_LIMIT
         }
 
     except Exception as e:
@@ -374,6 +401,139 @@ async def download_presentation(filename: str):
         path=f"presentations/{filename}",
         media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation"
     )
+
+
+@app.post("/api/revenuecat-webhook")
+async def revenuecat_webhook(payload: dict = Body(...)):
+    # 1. Basic validation
+    event = payload.get("event", {})
+    if not event:
+        return {"status": "invalid_payload"}
+
+    event_type = event.get("type")
+    app_user_id = event.get("app_user_id")
+    product_id = event.get("product_id", "")
+
+    # Validate required fields
+    if not all([event_type, app_user_id]):
+        print(f" Missing required fields: {payload}")
+        return {"status": "missing_fields"}
+
+    # Skip if Redis unavailable
+    if r is None:
+        print(" Redis unavailable - skipping webhook")
+        return {"status": "redis_unavailable"}
+
+    pro_key = f"pro:{app_user_id}"
+
+    try:
+        if event_type == "INITIAL_PURCHASE":
+            # Idempotent: Only set if not already pro
+            if not await r.exists(pro_key):
+                if "lifetime" in product_id.lower() or "149" in product_id:
+                    await r.set(pro_key, "lifetime")  # Forever!
+                    print(f" LIFETIME Pro: {app_user_id}")
+                else:
+                    await r.setex(pro_key, 31536000, "subscription")  # 1 year
+                    print(f" NEW Subscription: {app_user_id}")
+            else:
+                print(f" Initial purchase ignored (already pro): {app_user_id}")
+
+        elif event_type == "RENEWAL":
+            # Always refresh subscription expiry
+            await r.setex(pro_key, 31536000, "subscription")
+            print(f" Subscription renewed: {app_user_id}")
+
+        elif event_type == "CANCELLATION":
+            # Atomic: Only delete subscription status
+            deleted = await r.eval(
+                "if redis.call('GET', KEYS[1]) == 'subscription' then return redis.call('DEL', KEYS[1]) else return 0 "
+                "end",
+                1, pro_key
+            )
+            if deleted:
+                print(f" Subscription cancelled: {app_user_id}")
+            else:
+                print(f" No subscription to cancel: {app_user_id}")
+
+        elif event_type == "EXPIRATION":
+            # Clean up expired subscriptions
+            await r.delete(pro_key)
+            print(f" Subscription expired: {app_user_id}")
+
+        else:
+            print(f" Unknown event type: {event_type}")
+
+    except redis.RedisError as e:
+        print(f" Redis error in webhook: {e}")
+        return {"status": "redis_error"}
+
+    except Exception as e:
+        print(f" Webhook error: {e}")
+        return {"status": "error"}
+
+    return {"status": "ok"}
+
+
+@app.middleware("http")
+async def pro_guest_limiter(request: Request, call_next):
+    # ONLY for /api/generate-pptx POST requests
+    if request.url.path != "/api/generate-pptx" or request.method != "POST":
+        return await call_next(request)
+
+    # Skip if no Redis (app continues gracefully)
+    if r is None:
+        print("Redis unavailable - skipping limits")
+        return await call_next(request)
+
+    try:
+        # 1.PRO CHECK FIRST (highest priority)
+        rc_user_id = request.headers.get("X-RC-App-User-ID")
+        if rc_user_id:
+            pro_key = f"pro:{rc_user_id}"
+            pro_status = r.get(pro_key)
+            if pro_status:  # Lifetime or subscription
+                request.state.is_pro = True
+                print(f" Pro: {rc_user_id} ({pro_status.decode('utf-8', errors='ignore')})")
+                return await call_next(request)
+
+        # 2.GUEST TRACKING (only non-Pro users)
+        guest_id = create_guest_id(request)
+        guest_key = f"guest:{guest_id}"
+
+        # Atomic increment + TTL (30 days)
+        count = r.incr(guest_key)
+        r.expire(guest_key, 2592000)  # 30 days
+
+        request.state.guest_count = count
+        request.state.guest_id = guest_id
+        print(f"📊 Guest #{count}: {guest_id[:8]}...")
+
+        # 3.ENFORCE LIMIT (before endpoint)
+        if count > FREE_LIMIT:
+            print(f" Guest limit reached: {guest_id}")
+            return JSONResponse(
+                status_code=402,
+                content={
+                    "status": "limit_reached",
+                    "used": count,
+                    "limit": FREE_LIMIT,
+                    "guest_id": guest_id,
+                    "upgrade_url": "/upgrade",
+                    "message": f"You've created ${FREE_LIMIT} amazing presentations! Upgrade for unlimited."
+                }
+            )
+
+    except redis.RedisError as e:
+        print(f" Redis error: {e}")
+        # Continue without limits (don't break app)
+
+    except Exception as e:
+        print(f" Middleware error: {e}")
+        # Continue without limits
+
+    # Continue to endpoint
+    return await call_next(request)
 
 
 app.mount("/thumbnails", StaticFiles(directory="thumbnails"), name="thumbnails")
