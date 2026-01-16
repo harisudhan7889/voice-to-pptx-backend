@@ -503,7 +503,7 @@ async def pro_guest_limiter(request: Request, call_next):
         # 1. ASYNC PRO CHECK (FIXED)
         rc_user_id = request.headers.get("X-RC-App-User-ID")
         if rc_user_id:
-            pro_status = await r.get(f"pro:{rc_user_id}")
+            pro_status = r.get(f"pro:{rc_user_id}")
             if pro_status:
                 request.state.is_pro = True
                 print(f"Pro: {rc_user_id} ({pro_status.decode(errors='ignore')})")
@@ -511,8 +511,8 @@ async def pro_guest_limiter(request: Request, call_next):
 
         # 2. ASYNC GUEST TRACKING (FIXED)
         guest_id = create_guest_id(request)
-        count = await r.incr(f"guest:{guest_id}")
-        await r.expire(f"guest:{guest_id}", 2592000)
+        count = r.incr(f"guest:{guest_id}")
+        r.expire(f"guest:{guest_id}", 2592000)
 
         request.state.guest_count = int(count)
         request.state.guest_id = guest_id
