@@ -459,7 +459,7 @@ async def verify_revenuecat_signature(auth_header: str = None) -> bool:
 
 @app.post("/api/revenuecat-webhook")
 async def revenuecat_webhook(request: Request, payload: dict = Body(...)):
-    # FIXED: Use Authorization header (RevenueCat standard)
+    # ✅ KEEP: Custom async function
     auth_header = request.headers.get("Authorization", "")
     if not await verify_revenuecat_signature(auth_header):
         print("Invalid webhook auth")
@@ -491,29 +491,28 @@ async def revenuecat_webhook(request: Request, payload: dict = Body(...)):
             return {"status": "test_success"}
 
         elif event_type == "INITIAL_PURCHASE":
-            if not await r.exists(pro_key):
+            if not r.exists(pro_key):
                 if "lifetime" in product_id.lower() or "149" in product_id:
-                    await r.set(pro_key, "lifetime")
+                    r.set(pro_key, "lifetime")
                     print(f"LIFETIME: {app_user_id}")
                 else:
-                    await r.setex(pro_key, 31536000, "subscription")
+                    r.setex(pro_key, 31536000, "subscription")
                     print(f"SUBSCRIPTION: {app_user_id}")
             else:
                 print(f"Already pro: {app_user_id}")
 
         elif event_type == "RENEWAL":
-            await r.setex(pro_key, 31536000, "subscription")
+            r.setex(pro_key, 31536000, "subscription")
             print(f"RENEWED: {app_user_id}")
 
         elif event_type == "CANCELLATION":
-            # FIXED: Simple atomic check
-            status = await r.get(pro_key)
+            status = r.get(pro_key)
             if status == b"subscription":
-                await r.delete(pro_key)
+                r.delete(pro_key)
                 print(f"CANCELLED: {app_user_id}")
 
         elif event_type == "EXPIRATION":
-            await r.delete(pro_key)
+            r.delete(pro_key)
             print(f"EXPIRED: {app_user_id}")
 
         else:
