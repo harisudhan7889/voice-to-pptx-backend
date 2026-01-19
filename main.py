@@ -1,4 +1,5 @@
 import hmac
+import json
 import os
 import time
 from typing import List
@@ -207,14 +208,38 @@ async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request
         del r_id_list[1]
         del r_id_list[0]
 
+        rc_user_id = request_obj.headers.get("X-RC-App-User-ID") if request_obj else None
+        user_id = rc_user_id or getattr(request_obj.state, 'guest_id', f"guest-{int(time.time())}")
+
         # Watermark ONLY for free users (PPT #3+), NEVER for Pro
         if is_guest and guest_count >= FREE_LIMIT:
             add_watermark(prs, "Made with Voice-to-PPT Free")
-
-        filename = f"presentation-{template_id}-{int(time.time())}.pptx"
+        timestamp = int(time.time())
+        filename = f"presentation-{user_id[:8]}-{template_id}-{timestamp}.pptx"
+        # filename = f"presentation-{template_id}-{int(time.time())}.pptx"
         os.makedirs("presentations", exist_ok=True)
         output_path = f"presentations/{filename}"
         prs.save(output_path)
+
+        ppt_info = {
+            "filename": filename,
+            "template": template_id,
+            "created": timestamp,
+            "url": f"/download/{filename}",
+            "is_pro": is_pro
+        }
+
+        # Save to user's history list (Pro: permanent, Guest: session)
+        history_key = f"history:{user_id}"
+        r.lpush(history_key, json.dumps(ppt_info))
+
+        # Pro: Keep 50 PPTs | Free: Keep 3 PPTs
+        max_history = 50 if is_pro else 3
+        r.ltrim(history_key, 0, max_history - 1)
+
+        # Keep history alive (Pro: 30 days, Guest: 1 hour)
+        ttl = 2592000 if is_pro else 3600  # 30 days vs 1 hour
+        r.expire(history_key, ttl)
 
         return {
             "status": "success",
@@ -222,12 +247,60 @@ async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request
             "is_pro": is_pro,
             "is_guest": is_guest,
             "guest_count": guest_count,
+            "user_id": user_id,
             "show_upgrade": is_guest and guest_count >= FREE_LIMIT,
             "watermark": is_guest and guest_count >= FREE_LIMIT
         }
 
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/ppt-history")
+async def get_ppt_history(request: Request):
+    try:
+        # Skip if no Redis
+        if r is None:
+            print("Redis unavailable - empty history")
+            return {"ppt_history": [], "count": 0}
+
+        # Get user ID safely (Pro OR Guest)
+        rc_user_id = request.headers.get("X-RC-App-User-ID")
+        if rc_user_id:
+            history_key = f"history:{rc_user_id}"
+        else:
+            guest_id = create_guest_id(request)
+            if not guest_id:
+                print("No user ID available")
+                return {"ppt_history": [], "count": 0}
+            history_key = f"history:{guest_id}"
+
+        # Get history from Redis (safe decode)
+        history_raw = r.lrange(history_key, 0, 9)  # Max 10 recent
+
+        # Parse JSON safely
+        ppt_list = []
+        for item in history_raw:
+            try:
+                ppt_info = json.loads(item.decode('utf-8', errors='ignore'))
+                ppt_list.append(ppt_info)
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                print(f"Corrupt history item: {e}")
+                continue  # Skip bad items
+
+        print(f"History loaded: {len(ppt_list)} PPTs for {history_key[:20]}...")
+        return {
+            "ppt_history": ppt_list,
+            "count": len(ppt_list)
+        }
+
+    except redis.RedisError as e:
+        print(f"Redis error in history: {e}")
+        return {"ppt_history": [], "count": 0}
+
+    except Exception as e:
+        print(f"Unexpected error in get_ppt_history: {e}")
+        raise HTTPException(status_code=500, detail="History service temporarily unavailable")
 
 
 def add_watermark(prs, text: str):
