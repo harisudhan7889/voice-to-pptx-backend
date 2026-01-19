@@ -266,20 +266,16 @@ def generate_thumbnail(prs, filename: str) -> str:
     try:
         os.makedirs("thumbnails", exist_ok=True)
 
-        # FIX: Find first slide with content
-        target_slide = None
+        # FIX 1: Find first slide with content
+        target_slide_idx = 0
         for i, slide in enumerate(prs.slides):
-            if slide.shapes:  # Has content
-                target_slide = slide
+            if slide.shapes:  # Has content (text/images)
+                target_slide_idx = i
                 break
 
-        if not target_slide:
-            print("No slide content found - skipping thumbnail")
-            return ""
-
-        # Export first CONTENT slide
+        # FIX 2: Use prs.export_slide(SLIDE_INDEX)
         img_stream = BytesIO()
-        target_slide.export_slide(prs.slides.index(target_slide), img_stream)
+        prs.slides[target_slide_idx].export_slide(target_slide_idx, img_stream)
         img_stream.seek(0)
 
         img = Image.open(img_stream)
@@ -289,11 +285,11 @@ def generate_thumbnail(prs, filename: str) -> str:
         thumb_path = f"thumbnails/{thumb_filename}"
         img.save(thumb_path, "JPEG", quality=70, optimize=True)
 
-        print(f"Thumbnail created: {thumb_path}")
+        print(f"✅ Thumbnail created: {thumb_path}")
         return f"/thumbnail/{thumb_filename}"
 
     except Exception as e:
-        print(f"Thumbnail error: {e}")
+        print(f"❌ Thumbnail error: {e}")
         return ""
 
 
