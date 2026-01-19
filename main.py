@@ -2,9 +2,11 @@ import hmac
 import json
 import os
 import time
+from io import BytesIO
 from typing import List
 
 import redis
+import PIL.Image as Image
 from fastapi import FastAPI, Body, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -221,11 +223,14 @@ async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request
         output_path = f"presentations/{filename}"
         prs.save(output_path)
 
+        thumb_url = generate_thumbnail(prs, filename)
+
         ppt_info = {
             "filename": filename,
             "template": template_id,
             "created": timestamp,
             "url": f"/download/{filename}",
+            "thumbnail_url": thumb_url,
             "is_pro": is_pro
         }
 
@@ -248,12 +253,36 @@ async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request
             "is_guest": is_guest,
             "guest_count": guest_count,
             "user_id": user_id,
+            "thub"
             "show_upgrade": is_guest and guest_count >= FREE_LIMIT,
             "watermark": is_guest and guest_count >= FREE_LIMIT
         }
 
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+def generate_thumbnail(prs, filename: str) -> str:
+    """Ultra-small mobile thumbnail (80x60px = 4-5KB)"""
+    try:
+        os.makedirs("thumbnails", exist_ok=True)
+
+        img_stream = BytesIO()
+        prs.slides[0].export_slide(0, img_stream)
+        img_stream.seek(0)
+
+        img = Image.open(img_stream)
+        img.thumbnail((80, 60), Image.Resampling.LANCZOS)
+
+        thumb_filename = filename.replace('.pptx', '.jpg')
+        thumb_path = f"thumbnails/{thumb_filename}"
+
+        img.save(thumb_path, "JPEG", quality=70, optimize=True)
+
+        return f"/thumbnail/{thumb_filename}"
+
+    except Exception:
+        return ""
 
 
 @app.get("/api/ppt-history")
