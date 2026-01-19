@@ -1,22 +1,21 @@
+import hashlib
 import hmac
 import json
 import os
+import random
 import time
-from io import BytesIO
 from typing import List
 
 import redis
-import PIL.Image as Image
 from fastapi import FastAPI, Body, HTTPException
+from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pptx import Presentation
-from fastapi import Request
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
 from pptx.util import Pt, Inches
-import hashlib
 from pydantic import BaseModel
 from starlette.responses import JSONResponse
 
@@ -31,78 +30,7 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-
-def get_redis_client() -> redis.Redis | None:
-    url = os.getenv("REDIS_URL")
-    if not url:
-        print("REDIS_URL not set, guest limiting disabled")
-        return None
-    try:
-        client = redis.from_url(url)
-        # Light ping to validate connection
-        client.ping()
-        print("Connected to Redis successfully")
-        return client
-    except Exception as e:
-        print(f"Redis connection failed: {e}")
-        return None
-
-
-# Redis connection
-r = get_redis_client()
-
-
-def create_guest_id(request: Request) -> str:
-    """Fingerprint = IP + User-Agent (privacy-safe)"""
-    ip = request.client.host.replace("::ffff:", "")
-    ua = request.headers.get("user-agent", "")[:100]
-    fingerprint = f"{ip}:{ua}"
-    return hashlib.md5(fingerprint.encode()).hexdigest()
-
-
-# @app.middleware("http")
-# async def guest_limiter(request: Request, call_next):
-#     # If Redis not available, skip limiting (but app still works)
-#     if r is None:
-#         return await call_next(request)
-#
-#     if request.url.path == "/api/generate-pptx" and request.method == "POST":
-#         guest_id = create_guest_id(request)
-#         key = f"guest:{guest_id}"
-#
-#         # Track usage
-#         count = r.incr(key)
-#         r.expire(key, 2592000)  # 30 days
-#
-#         # Store in request state for PPT generation
-#         request.state.guest_count = count
-#         request.state.guest_id = guest_id
-#
-#         if count > FREE_LIMIT:
-#             return JSONResponse(
-#                 status_code=402,
-#                 content={
-#                     "status": "limit_reached",
-#                     "used": count,
-#                     "limit": FREE_LIMIT,
-#                     "guest_id": guest_id,
-#                     "upgrade_url": "/upgrade",
-#                     "message": "You've created 3 amazing presentations!"
-#                 }
-#             )
-#
-#     response = await call_next(request)
-#     return response
-
-
-@app.get("/api/templates")
-async def get_templates():
-    """
-    Fetch available templates grouped by type
-    """
-    return {
-        "status": "success",
-        "templates": [
+templates = [
             {
                 "id": "geometric",
                 "name": "geometric",
@@ -146,6 +74,44 @@ async def get_templates():
                 "thumbnails": ["/thumbnails/thumbnail_paperback_1.png", "/thumbnails/thumbnail_paperback_2.png"]
             }
         ]
+
+
+def get_redis_client() -> redis.Redis | None:
+    url = os.getenv("REDIS_URL")
+    if not url:
+        print("REDIS_URL not set, guest limiting disabled")
+        return None
+    try:
+        client = redis.from_url(url)
+        # Light ping to validate connection
+        client.ping()
+        print("Connected to Redis successfully")
+        return client
+    except Exception as e:
+        print(f"Redis connection failed: {e}")
+        return None
+
+
+# Redis connection
+r = get_redis_client()
+
+
+def create_guest_id(request: Request) -> str:
+    """Fingerprint = IP + User-Agent (privacy-safe)"""
+    ip = request.client.host.replace("::ffff:", "")
+    ua = request.headers.get("user-agent", "")[:100]
+    fingerprint = f"{ip}:{ua}"
+    return hashlib.md5(fingerprint.encode()).hexdigest()
+
+
+@app.get("/api/templates")
+async def get_templates():
+    """
+    Fetch available templates grouped by type
+    """
+    return {
+        "status": "success",
+        "templates": templates
     }
 
 
@@ -223,7 +189,7 @@ async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request
         output_path = f"presentations/{filename}"
         prs.save(output_path)
 
-        thumb_url = generate_thumbnail(prs, filename)
+        thumb_url = generate_thumbnail(template_id)
 
         ppt_info = {
             "filename": filename,
@@ -261,35 +227,24 @@ async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request
         return {"status": "error", "message": str(e)}
 
 
-def generate_thumbnail(prs, filename: str) -> str:
-    """Generate thumbnail from first NON-EMPTY slide"""
+def generate_thumbnail(template_id: str) -> str:
+    """Use your existing template thumbnails"""
     try:
-        os.makedirs("thumbnails", exist_ok=True)
+        # Find template by ID
+        template = next((t for t in templates if t["id"] == template_id), None)
 
-        # FIX 1: Find first slide with content
-        target_slide_idx = 0
-        for i, slide in enumerate(prs.slides):
-            if slide.shapes:  # Has content (text/images)
-                target_slide_idx = i
-                break
+        if not template or not template["thumbnails"]:
+            print(f"No thumbnails for template: {template_id}")
+            return ""
 
-        # FIX 2: Use prs.export_slide(SLIDE_INDEX)
-        img_stream = BytesIO()
-        prs.slides[target_slide_idx].export_slide(target_slide_idx, img_stream)
-        img_stream.seek(0)
+        # Pick random thumbnail from array (like template selector)
+        thumb_url = random.choice(template["thumbnails"])
+        print(f"Using template thumb: {thumb_url}")
 
-        img = Image.open(img_stream)
-        img.thumbnail((80, 60), Image.Resampling.LANCZOS)
-
-        thumb_filename = filename.replace('.pptx', '.jpg')
-        thumb_path = f"thumbnails/{thumb_filename}"
-        img.save(thumb_path, "JPEG", quality=70, optimize=True)
-
-        print(f"✅ Thumbnail created: {thumb_path}")
-        return f"/thumbnail/{thumb_filename}"
+        return thumb_url  # Already perfect URL!
 
     except Exception as e:
-        print(f"❌ Thumbnail error: {e}")
+        print(f"Thumbnail error: {e}")
         return ""
 
 
