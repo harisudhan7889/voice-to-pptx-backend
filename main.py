@@ -253,7 +253,6 @@ async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request
             "is_guest": is_guest,
             "guest_count": guest_count,
             "user_id": user_id,
-            "thub"
             "show_upgrade": is_guest and guest_count >= FREE_LIMIT,
             "watermark": is_guest and guest_count >= FREE_LIMIT
         }
@@ -263,12 +262,24 @@ async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request
 
 
 def generate_thumbnail(prs, filename: str) -> str:
-    """Ultra-small mobile thumbnail (80x60px = 4-5KB)"""
+    """Generate thumbnail from first NON-EMPTY slide"""
     try:
         os.makedirs("thumbnails", exist_ok=True)
 
+        # FIX: Find first slide with content
+        target_slide = None
+        for i, slide in enumerate(prs.slides):
+            if slide.shapes:  # Has content
+                target_slide = slide
+                break
+
+        if not target_slide:
+            print("No slide content found - skipping thumbnail")
+            return ""
+
+        # Export first CONTENT slide
         img_stream = BytesIO()
-        prs.slides[0].export_slide(0, img_stream)
+        target_slide.export_slide(prs.slides.index(target_slide), img_stream)
         img_stream.seek(0)
 
         img = Image.open(img_stream)
@@ -276,12 +287,13 @@ def generate_thumbnail(prs, filename: str) -> str:
 
         thumb_filename = filename.replace('.pptx', '.jpg')
         thumb_path = f"thumbnails/{thumb_filename}"
-
         img.save(thumb_path, "JPEG", quality=70, optimize=True)
 
+        print(f"Thumbnail created: {thumb_path}")
         return f"/thumbnail/{thumb_filename}"
 
-    except Exception:
+    except Exception as e:
+        print(f"Thumbnail error: {e}")
         return ""
 
 
