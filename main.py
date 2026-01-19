@@ -177,7 +177,12 @@ async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request
         del r_id_list[0]
 
         rc_user_id = request_obj.headers.get("X-RC-App-User-ID") if request_obj else None
-        user_id = rc_user_id or getattr(request_obj.state, 'guest_id', f"guest-{int(time.time())}")
+        guest_id = getattr(request_obj.state, 'guest_id', None)
+
+        if guest_id:
+            user_id = guest_id
+        else:
+            user_id = rc_user_id or f"guest-{int(time.time())}"
 
         # Watermark ONLY for free users (PPT #3+), NEVER for Pro
         if is_guest and guest_count >= FREE_LIMIT:
