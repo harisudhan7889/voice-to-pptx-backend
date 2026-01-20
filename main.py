@@ -132,25 +132,23 @@ class SlidesRequest(BaseModel):
 @app.post("/api/generate-pptx")
 async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request = None):
     try:
-        # NEW: Check Pro status FIRST (middleware sets this)
+        # Check Pro status from middleware (set for ALL users)
         is_pro = getattr(request_obj.state, 'is_pro', False) if request_obj else False
-
-        # Get guest info from middleware (if exists and NOT pro)
-        guest_count = getattr(request_obj.state, 'guest_count', 0) if request_obj and not is_pro else 0
-        is_guest = not is_pro and (not request_obj or not request_obj.headers.get("authorization"))
+        guest_count = getattr(request_obj.state, 'guest_count', 0) if request_obj else 0
+        guest_id = getattr(request_obj.state, 'guest_id', None) if request_obj else None
 
         slides_data = request.dict()
         template_id = slides_data.get("templateId")
-
-        print(f" - Pro: {is_pro}, Guest count: {guest_count}")
+        print(f" - Pro: {is_pro}, Guest count: {guest_count}, Guest ID: {guest_id[:8] if guest_id else 'None'}")
 
         # Pro users = NO watermark, NO limits
         if is_pro:
             print("Pro user - Unlimited access")
-        # Free users = watermark on #3+
-        elif is_guest and guest_count >= FREE_LIMIT:
+        # Free users = watermark on limit exceeded (middleware already blocked >FREE_LIMIT)
+        elif guest_count >= FREE_LIMIT:
             print("Free user - Watermark added")
 
+        # Template handling (unchanged)
         template_files = {
             "geometric": "templates/geometric.pptx",
             "streamline": "templates/streamline.pptx",
@@ -176,20 +174,21 @@ async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request
         del r_id_list[1]
         del r_id_list[0]
 
-        rc_user_id = request_obj.headers.get("X-RC-App-User-ID") if request_obj else None
-        guest_id = getattr(request_obj.state, 'guest_id', None)
-
-        if guest_id:
-            user_id = guest_id
-        else:
+        # SIMPLIFIED user_id logic - Use middleware's guest_id ALWAYS
+        user_id = guest_id
+        if not user_id:
+            # Absolute fallback (should never happen with updated middleware)
+            rc_user_id = request_obj.headers.get("X-RC-App-User-ID") if request_obj else None
             user_id = rc_user_id or f"guest-{int(time.time())}"
 
-        # Watermark ONLY for free users (PPT #3+), NEVER for Pro
-        if is_guest and guest_count >= FREE_LIMIT:
+        print(f"Using user_id: {user_id[:8]} for history")
+
+        # Watermark ONLY for free users at limit (middleware already blocked excess)
+        if not is_pro and guest_count >= FREE_LIMIT:
             add_watermark(prs, "Made with Voice-to-PPT Free")
+
         timestamp = int(time.time())
         filename = f"presentation-{user_id[:8]}-{template_id}-{timestamp}.pptx"
-        # filename = f"presentation-{template_id}-{int(time.time())}.pptx"
         os.makedirs("presentations", exist_ok=True)
         output_path = f"presentations/{filename}"
         prs.save(output_path)
@@ -205,30 +204,28 @@ async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request
             "is_pro": is_pro
         }
 
-        # Save to user's history list (Pro: permanent, Guest: session)
+        # Save to user's history (ALWAYS uses middleware guest_id)
         history_key = f"history:{user_id}"
         r.lpush(history_key, json.dumps(ppt_info))
 
-        # Pro: Keep 50 PPTs | Free: Keep 3 PPTs
+        # History limits
         max_history = 50 if is_pro else 3
         r.ltrim(history_key, 0, max_history - 1)
-
-        # Keep history alive (Pro: 30 days, Guest: 1 hour)
-        ttl = 2592000 if is_pro else 3600  # 30 days vs 1 hour
+        ttl = 2592000 if is_pro else 3600
         r.expire(history_key, ttl)
 
         return {
             "status": "success",
             "downloadUrl": f"/download/{filename}",
             "is_pro": is_pro,
-            "is_guest": is_guest,
             "guest_count": guest_count,
             "user_id": user_id,
-            "show_upgrade": is_guest and guest_count >= FREE_LIMIT,
-            "watermark": is_guest and guest_count >= FREE_LIMIT
+            "show_upgrade": not is_pro and guest_count >= FREE_LIMIT,
+            "watermark": not is_pro and guest_count >= FREE_LIMIT
         }
 
     except Exception as e:
+        print(f"generate_pptx error: {e}")
         return {"status": "error", "message": str(e)}
 
 
@@ -464,7 +461,7 @@ async def verify_revenuecat_signature(auth_header: str = None) -> bool:
 
 @app.post("/api/revenuecat-webhook")
 async def revenuecat_webhook(request: Request, payload: dict = Body(...)):
-    # ✅ KEEP: Custom async function
+    # Verify RevenueCat signature
     auth_header = request.headers.get("Authorization", "")
     if not await verify_revenuecat_signature(auth_header):
         print("Invalid webhook auth")
@@ -485,14 +482,14 @@ async def revenuecat_webhook(request: Request, payload: dict = Body(...)):
     product_id = event.get("product_id", "")
 
     if not all([event_type, app_user_id]):
-        print(f"Missing fields: {event_type}, {app_user_id}")
+        print(f"Missing fields: event_type={event_type}, app_user_id={app_user_id}")
         return {"status": "missing_fields"}
 
     pro_key = f"pro:{app_user_id}"
 
     try:
         if event_type == "TEST":
-            print(f"🧪 TEST SUCCESS: {app_user_id}")
+            print(f"TEST SUCCESS: {app_user_id}")
             return {"status": "test_success"}
 
         elif event_type == "INITIAL_PURCHASE":
@@ -520,8 +517,12 @@ async def revenuecat_webhook(request: Request, payload: dict = Body(...)):
             r.delete(pro_key)
             print(f"EXPIRED: {app_user_id}")
 
+        elif event_type == "BILLING_ISSUE":
+            print(f"Billing issue detected: {app_user_id}")
+            # Optionally handle grace period or warnings
+
         else:
-            print(f"Unknown: {event_type}")
+            print(f"Unhandled event: {event_type}")
 
     except Exception as e:
         print(f"Webhook error: {e}")
@@ -540,25 +541,39 @@ async def pro_guest_limiter(request: Request, call_next):
         return await call_next(request)
 
     try:
-        # 1. ASYNC PRO CHECK (FIXED)
+        # 1. PRO CHECK FIRST (RevenueCat ID)
         rc_user_id = request.headers.get("X-RC-App-User-ID")
         if rc_user_id:
             pro_status = r.get(f"pro:{rc_user_id}")
             if pro_status:
                 request.state.is_pro = True
-                print(f"Pro: {rc_user_id} ({pro_status.decode(errors='ignore')})")
+                print(f"Pro: {rc_user_id[:20]} ({pro_status.decode(errors='ignore')})")
+                # Still set guest_id for history continuity
+                client_user_id = request.headers.get("X-Client-User-ID")
+                request.state.guest_id = client_user_id or f"anon-{int(time.time())}"
                 return await call_next(request)
 
-        # 2. ASYNC GUEST TRACKING (FIXED)
-        guest_id = create_guest_id(request)
+        # 2. CLIENT-CONTROLLED GUEST ID (Stable across requests)
+        client_user_id = request.headers.get("X-Client-User-ID")
+        if client_user_id:
+            guest_id = client_user_id
+            print(f"Client ID: {guest_id[:8]}...")
+        else:
+            # Fallback for clients without header (rare)
+            guest_id = f"anon-{int(time.time())}"
+            print(f"Fallback ID: {guest_id[:8]}...")
+
+        request.state.guest_id = guest_id
+
+        # 3. GUEST LIMIT TRACKING
         count = r.incr(f"guest:{guest_id}")
-        r.expire(f"guest:{guest_id}", 2592000)
+        if count == 1:
+            r.expire(f"guest:{guest_id}", 2592000)
 
         request.state.guest_count = int(count)
-        request.state.guest_id = guest_id
         print(f"Guest #{count}: {guest_id[:8]}...")
 
-        # 3. FIXED LIMIT RESPONSE
+        # 4. LIMIT RESPONSE
         if count > FREE_LIMIT:
             return JSONResponse(
                 status_code=402,
@@ -574,6 +589,8 @@ async def pro_guest_limiter(request: Request, call_next):
 
     except Exception as e:
         print(f"Middleware error: {e}")
+        # Don't block request on error
+        request.state.guest_id = f"error-{int(time.time())}"
 
     return await call_next(request)
 
