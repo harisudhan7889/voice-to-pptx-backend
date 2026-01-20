@@ -136,7 +136,6 @@ async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request
         # Pro users = NO watermark, NO limits
         if is_pro:
             print("Pro user - Unlimited access")
-        # Free users = watermark on limit exceeded (middleware already blocked >FREE_LIMIT)
         elif guest_count >= FREE_LIMIT:
             print("Free user - Watermark added")
 
@@ -152,36 +151,36 @@ async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request
         }
         template_path = template_files.get(template_id, template_files["slate"])
 
-        # ✅ FIXED: Use slide LAYOUTS directly (industry standard)
         prs = Presentation(template_path)
+        title_template = prs.slides[0]
+        content_template = prs.slides[1]
 
-        # Get layouts from template (index 0=title, index 1=content)
-        title_layout = prs.slide_layouts[0]  # Title slide layout
-        content_layout = prs.slide_layouts[1]  # Title + Content layout
-
-        # ✅ FIXED: Create slides with proper layouts
+        # Build new slides using template layouts
+        new_slides = []
         for slide_data in slides_data["slides"]:
             slide_type = slide_data.get("type", "content")
-            # Use correct layout for each slide type
-            layout = title_layout if slide_type == "title" else content_layout
-            slide = prs.slides.add_slide(layout)
-            add_slide_content(slide, slide_data)
+            template = title_template if slide_type == "title" else content_template
+            new_slide = prs.slides.add_slide(template.slide_layout)
+            add_slide_content(new_slide, slide_data)
+            new_slides.append(new_slide)
 
-        # ✅ FIXED: REMOVE slide deletion - corrupts PPTX structure
-        # r_id_list = prs.slides._sldIdLst  # DELETED
-        # del r_id_list[1]                  # DELETED
-        # del r_id_list[0]                  # DELETED
+        # ✅ SAFE: Remove ONLY original template slides AFTER adding new ones
+        r_id_list = prs.slides._sldIdLst
+        # Remove original template slides (first 2) - now safe after new slides added
+        if len(r_id_list) >= 2:
+            # Remove in reverse order to preserve indices
+            r_id_list.remove(r_id_list[1])  # content_template
+            r_id_list.remove(r_id_list[0])  # title_template
 
-        # SIMPLIFIED user_id logic - Use middleware's guest_id ALWAYS
+        # SIMPLIFIED user_id logic
         user_id = guest_id
         if not user_id:
-            # Absolute fallback (should never happen with updated middleware)
             rc_user_id = request_obj.headers.get("X-RC-App-User-ID") if request_obj else None
             user_id = rc_user_id or f"guest-{int(time.time())}"
 
         print(f"Using user_id: {user_id[:8]} for history")
 
-        # Watermark ONLY for free users at limit (middleware already blocked excess)
+        # Watermark for free users at limit
         if not is_pro and guest_count >= FREE_LIMIT:
             add_watermark(prs, "Made with Voice-to-PPT Free")
 
@@ -202,11 +201,9 @@ async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request
             "is_pro": is_pro
         }
 
-        # Save to user's history (ALWAYS uses middleware guest_id)
+        # Save to user's history
         history_key = f"history:{user_id}"
         r.lpush(history_key, json.dumps(ppt_info))
-
-        # History limits
         max_history = 50 if is_pro else 3
         r.ltrim(history_key, 0, max_history - 1)
         ttl = 2592000 if is_pro else 3600
