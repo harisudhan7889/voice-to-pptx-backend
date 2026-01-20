@@ -19,7 +19,7 @@ from pptx.util import Pt, Inches
 from pydantic import BaseModel
 from starlette.responses import JSONResponse
 
-FREE_LIMIT = 3
+FREE_LIMIT = 1
 
 app = FastAPI()
 
