@@ -96,14 +96,6 @@ def get_redis_client() -> redis.Redis | None:
 r = get_redis_client()
 
 
-def create_guest_id(request: Request) -> str:
-    """Fingerprint = IP + User-Agent (privacy-safe)"""
-    ip = request.client.host.replace("::ffff:", "")
-    ua = request.headers.get("user-agent", "")[:100]
-    fingerprint = f"{ip}:{ua}"
-    return hashlib.md5(fingerprint.encode()).hexdigest()
-
-
 @app.get("/api/templates")
 async def get_templates():
     """
@@ -258,16 +250,16 @@ async def get_ppt_history(request: Request):
             print("Redis unavailable - empty history")
             return {"ppt_history": [], "count": 0}
 
-        # Get user ID safely (Pro OR Guest)
-        rc_user_id = request.headers.get("X-RC-App-User-ID")
-        if rc_user_id:
-            history_key = f"history:{rc_user_id}"
+        # Get CLIENT-CONTROLLED user ID (same as generate_pptx uses)
+        client_user_id = request.headers.get("X-Client-User-ID")
+        if client_user_id:
+            history_key = f"history:{client_user_id}"
+            print(f"History lookup: Client ID {client_user_id[:8]}...")
         else:
-            guest_id = create_guest_id(request)
-            if not guest_id:
-                print("No user ID available")
-                return {"ppt_history": [], "count": 0}
-            history_key = f"history:{guest_id}"
+            # Fallback (rare - middleware always sets this)
+            fallback_id = f"anon-{int(time.time())}"
+            history_key = f"history:{fallback_id}"
+            print(f"History fallback: {fallback_id[:8]}...")
 
         # Get history from Redis (safe decode)
         history_raw = r.lrange(history_key, 0, 9)  # Max 10 recent
