@@ -140,7 +140,7 @@ async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request
         elif guest_count >= FREE_LIMIT:
             print("Free user - Watermark added")
 
-        # Template handling (unchanged)
+        # Template handling
         template_files = {
             "geometric": "templates/geometric.pptx",
             "streamline": "templates/streamline.pptx",
@@ -152,19 +152,25 @@ async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request
         }
         template_path = template_files.get(template_id, template_files["slate"])
 
+        # ✅ FIXED: Use slide LAYOUTS directly (industry standard)
         prs = Presentation(template_path)
-        title_template = prs.slides[0]
-        content_template = prs.slides[1]
 
+        # Get layouts from template (index 0=title, index 1=content)
+        title_layout = prs.slide_layouts[0]  # Title slide layout
+        content_layout = prs.slide_layouts[1]  # Title + Content layout
+
+        # ✅ FIXED: Create slides with proper layouts
         for slide_data in slides_data["slides"]:
             slide_type = slide_data.get("type", "content")
-            template = title_template if slide_type == "title" else content_template
-            slide = prs.slides.add_slide(template.slide_layout)
+            # Use correct layout for each slide type
+            layout = title_layout if slide_type == "title" else content_layout
+            slide = prs.slides.add_slide(layout)
             add_slide_content(slide, slide_data)
 
-        r_id_list = prs.slides._sldIdLst
-        del r_id_list[1]
-        del r_id_list[0]
+        # ✅ FIXED: REMOVE slide deletion - corrupts PPTX structure
+        # r_id_list = prs.slides._sldIdLst  # DELETED
+        # del r_id_list[1]                  # DELETED
+        # del r_id_list[0]                  # DELETED
 
         # SIMPLIFIED user_id logic - Use middleware's guest_id ALWAYS
         user_id = guest_id
@@ -219,6 +225,106 @@ async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request
     except Exception as e:
         print(f"generate_pptx error: {e}")
         return {"status": "error", "message": str(e)}
+
+
+# @app.post("/api/generate-pptx")
+# async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request = None):
+#     try:
+#         # Check Pro status from middleware (set for ALL users)
+#         is_pro = getattr(request_obj.state, 'is_pro', False) if request_obj else False
+#         guest_count = getattr(request_obj.state, 'guest_count', 0) if request_obj else 0
+#         guest_id = getattr(request_obj.state, 'guest_id', None) if request_obj else None
+#
+#         slides_data = request.dict()
+#         template_id = slides_data.get("templateId")
+#         print(f" - Pro: {is_pro}, Guest count: {guest_count}, Guest ID: {guest_id[:8] if guest_id else 'None'}")
+#
+#         # Pro users = NO watermark, NO limits
+#         if is_pro:
+#             print("Pro user - Unlimited access")
+#         # Free users = watermark on limit exceeded (middleware already blocked >FREE_LIMIT)
+#         elif guest_count >= FREE_LIMIT:
+#             print("Free user - Watermark added")
+#
+#         # Template handling (unchanged)
+#         template_files = {
+#             "geometric": "templates/geometric.pptx",
+#             "streamline": "templates/streamline.pptx",
+#             "swiss": "templates/swiss.pptx",
+#             "momentum": "templates/momentum.pptx",
+#             "material": "templates/material.pptx",
+#             "slate": "templates/slate.pptx",
+#             "paperback": "templates/paperback.pptx"
+#         }
+#         template_path = template_files.get(template_id, template_files["slate"])
+#
+#         prs = Presentation(template_path)
+#         title_template = prs.slides[0]
+#         content_template = prs.slides[1]
+#
+#         for slide_data in slides_data["slides"]:
+#             slide_type = slide_data.get("type", "content")
+#             template = title_template if slide_type == "title" else content_template
+#             slide = prs.slides.add_slide(template.slide_layout)
+#             add_slide_content(slide, slide_data)
+#
+#         r_id_list = prs.slides._sldIdLst
+#         del r_id_list[1]
+#         del r_id_list[0]
+#
+#         # SIMPLIFIED user_id logic - Use middleware's guest_id ALWAYS
+#         user_id = guest_id
+#         if not user_id:
+#             # Absolute fallback (should never happen with updated middleware)
+#             rc_user_id = request_obj.headers.get("X-RC-App-User-ID") if request_obj else None
+#             user_id = rc_user_id or f"guest-{int(time.time())}"
+#
+#         print(f"Using user_id: {user_id[:8]} for history")
+#
+#         # Watermark ONLY for free users at limit (middleware already blocked excess)
+#         if not is_pro and guest_count >= FREE_LIMIT:
+#             add_watermark(prs, "Made with Voice-to-PPT Free")
+#
+#         timestamp = int(time.time())
+#         filename = f"presentation-{user_id[:8]}-{template_id}-{timestamp}.pptx"
+#         os.makedirs("presentations", exist_ok=True)
+#         output_path = f"presentations/{filename}"
+#         prs.save(output_path)
+#
+#         thumb_url = generate_thumbnail(template_id)
+#
+#         ppt_info = {
+#             "filename": filename,
+#             "template": template_id,
+#             "created": timestamp,
+#             "url": f"/download/{filename}",
+#             "thumbnail_url": thumb_url,
+#             "is_pro": is_pro
+#         }
+#
+#         # Save to user's history (ALWAYS uses middleware guest_id)
+#         history_key = f"history:{user_id}"
+#         r.lpush(history_key, json.dumps(ppt_info))
+#
+#         # History limits
+#         max_history = 50 if is_pro else 3
+#         r.ltrim(history_key, 0, max_history - 1)
+#         ttl = 2592000 if is_pro else 3600
+#         r.expire(history_key, ttl)
+#
+#         return {
+#             "status": "success",
+#             "downloadUrl": f"/download/{filename}",
+#             "is_pro": is_pro,
+#             "guest_count": guest_count,
+#             "user_id": user_id,
+#             "show_upgrade": not is_pro and guest_count >= FREE_LIMIT,
+#             "watermark": not is_pro and guest_count >= FREE_LIMIT
+#         }
+#
+#     except Exception as e:
+#         print(f"generate_pptx error: {e}")
+#         return {"status": "error", "message": str(e)}
 
 
 def generate_thumbnail(template_id: str) -> str:
@@ -337,72 +443,119 @@ def get_correct_layout(prs, slide_type):
 
 
 def add_slide_content(slide, slide_data):
-    """Update text in placeholders - NEVER clear text_frame"""
+    """Safe PPTX content addition - NO XML manipulation"""
 
     slide_type = slide_data.get("type", "content")
     title = slide_data.get("title", "")
-    content_format = slide_data.get("format", "bullets")  # NEW: Get format type
+    content_format = slide_data.get("format", "bullets")
     content = slide_data.get("content", [])
 
-    print(f" - Content: {content_format}")
+    # Use PROPER placeholders (python-pptx standard)
+    try:
+        # Title placeholder (ALWAYS index 0)
+        title_shape = slide.shapes.title or slide.placeholders[0]
+        title_shape.text = title
 
-    # Get ALL text shapes in order
-    text_shapes = [shape for shape in slide.shapes if shape.has_text_frame]
-    text_shapes.sort(key=lambda s: s.top)
+        if slide_type == "title" and content:
+            # Subtitle on title slide
+            subtitle_shape = slide.placeholders[1]
+            subtitle_shape.text = content[0]
+        else:
+            # Content slide - content placeholder (ALWAYS index 1)
+            content_shape = slide.placeholders[1]
+            content_frame = content_shape.text_frame
 
-    if slide_type == "title":
-        # Title slide
-        if len(text_shapes) >= 1:
-            # Update first shape (title)
-            p = text_shapes[0].text_frame.paragraphs[0]
-            p.text = title
+            # ✅ SAFE: Clear properly (python-pptx way)
+            content_frame.clear()  # Removes ALL paragraphs safely
 
-        if len(text_shapes) >= 2 and content:
-            # Update second shape (subtitle)
-            p = text_shapes[1].text_frame.paragraphs[0]
-            if content_format == "paragraph":
-                p.text = content[0]  # Single string for paragraph
+            # Add content
+            if content_format == "paragraph" and content:
+                p = content_frame.add_paragraph()
+                p.text = content[0]
             else:
-                p.text = content[0]  # First item for bullets
-
-    else:  # content slide
-        # Content slide
-        if len(text_shapes) >= 1:
-            # Update first shape (title)
-            p = text_shapes[0].text_frame.paragraphs[0]
-            p.text = title
-
-        if len(text_shapes) >= 2:
-            # Update second shape (content)
-            content_frame = text_shapes[1].text_frame
-
-            # IMPORTANT: Don't clear! Just update/add paragraphs
-            # Remove ALL paragraphs except first
-            while len(content_frame.paragraphs) > 1:
-                # Get the paragraph element
-                p_element = content_frame.paragraphs[1].element
-                # Remove from XML
-                p_element.getparent().remove(p_element)
-
-            # NEW: Handle based on format type
-            if content_format == "paragraph":
-                # Single paragraph content
-                p = content_frame.paragraphs[0]
-                p.text = content[0]  # content is a string
-                p.level = 0
-            else:  # bullets format
-                # Multiple bullet points (content is array)
-                for i, bullet in enumerate(content):
-                    if i == 0:
-                        # Update first paragraph (already exists)
-                        p = content_frame.paragraphs[0]
-                        p.text = bullet
-                    else:
-                        # Add new paragraph
-                        p = content_frame.add_paragraph()
-                        p.text = bullet
-
+                # Bullets
+                for bullet in content[:5]:  # Limit to 5 bullets
+                    p = content_frame.add_paragraph()
+                    p.text = bullet
                     p.level = 0
+
+    except Exception as e:
+        print(f"add_slide_content error: {e}")
+        # Fallback: Use first available text shape
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                tf = shape.text_frame
+                tf.clear()
+                tf.text = f"{title}\n" + "\n".join(content[:3])
+                break
+
+# def add_slide_content(slide, slide_data):
+#     """Update text in placeholders - NEVER clear text_frame"""
+#
+#     slide_type = slide_data.get("type", "content")
+#     title = slide_data.get("title", "")
+#     content_format = slide_data.get("format", "bullets")  # NEW: Get format type
+#     content = slide_data.get("content", [])
+#
+#     print(f" - Content: {content_format}")
+#
+#     # Get ALL text shapes in order
+#     text_shapes = [shape for shape in slide.shapes if shape.has_text_frame]
+#     text_shapes.sort(key=lambda s: s.top)
+#
+#     if slide_type == "title":
+#         # Title slide
+#         if len(text_shapes) >= 1:
+#             # Update first shape (title)
+#             p = text_shapes[0].text_frame.paragraphs[0]
+#             p.text = title
+#
+#         if len(text_shapes) >= 2 and content:
+#             # Update second shape (subtitle)
+#             p = text_shapes[1].text_frame.paragraphs[0]
+#             if content_format == "paragraph":
+#                 p.text = content[0]  # Single string for paragraph
+#             else:
+#                 p.text = content[0]  # First item for bullets
+#
+#     else:  # content slide
+#         # Content slide
+#         if len(text_shapes) >= 1:
+#             # Update first shape (title)
+#             p = text_shapes[0].text_frame.paragraphs[0]
+#             p.text = title
+#
+#         if len(text_shapes) >= 2:
+#             # Update second shape (content)
+#             content_frame = text_shapes[1].text_frame
+#
+#             # IMPORTANT: Don't clear! Just update/add paragraphs
+#             # Remove ALL paragraphs except first
+#             while len(content_frame.paragraphs) > 1:
+#                 # Get the paragraph element
+#                 p_element = content_frame.paragraphs[1].element
+#                 # Remove from XML
+#                 p_element.getparent().remove(p_element)
+#
+#             # NEW: Handle based on format type
+#             if content_format == "paragraph":
+#                 # Single paragraph content
+#                 p = content_frame.paragraphs[0]
+#                 p.text = content[0]  # content is a string
+#                 p.level = 0
+#             else:  # bullets format
+#                 # Multiple bullet points (content is array)
+#                 for i, bullet in enumerate(content):
+#                     if i == 0:
+#                         # Update first paragraph (already exists)
+#                         p = content_frame.paragraphs[0]
+#                         p.text = bullet
+#                     else:
+#                         # Add new paragraph
+#                         p = content_frame.add_paragraph()
+#                         p.text = bullet
+#
+#                     p.level = 0
 
 
 def debug_slide(slide):
