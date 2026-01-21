@@ -739,7 +739,7 @@ async def revenuecat_webhook(request: Request, payload: dict = Body(...)):
             print(f"TEST SUCCESS: {app_user_id}")
             return {"status": "test_success"}
 
-        elif event_type == "INITIAL_PURCHASE":
+        elif event_type == ['INITIAL_PURCHASE', 'NON_RENEWING_PURCHASE']:
             if not r.exists(pro_key):
                 if "lifetime" in product_id.lower() or "149" in product_id:
                     r.set(pro_key, "lifetime")
