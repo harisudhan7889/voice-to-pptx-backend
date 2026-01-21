@@ -391,6 +391,8 @@ async def get_user_status(request: Request):
 
             # Free user count
             used_count = r.get(f"guest:{client_user_id}")
+            if used_count > FREE_LIMIT:
+                used_count = FREE_LIMIT
             used = int(used_count) if used_count else 0
             remaining = max(0, FREE_LIMIT - used)
 
