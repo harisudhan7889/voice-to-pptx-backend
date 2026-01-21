@@ -97,14 +97,39 @@ r = get_redis_client()
 
 
 @app.get("/api/templates")
-async def get_templates():
+async def get_templates(request: Request):
     """
     Fetch available templates grouped by type
+    Returns pro status for frontend template locking
     """
-    return {
-        "status": "success",
-        "templates": templates
-    }
+    try:
+        # Check Pro status using same logic as middleware
+        rc_user_id = request.headers.get("X-RC-App-User-ID")
+        is_pro = False
+
+        if rc_user_id and r is not None:
+            pro_status = r.get(f"pro:{rc_user_id}")
+            if pro_status:
+                is_pro = True
+                print(f"Template request - Pro user: {rc_user_id[:20]}")
+
+        # Original templates with pro status
+        templates_response = {
+            "status": "success",
+            "templates": templates,
+            "is_pro": is_pro
+        }
+
+        return templates_response
+
+    except Exception as e:
+        print(f"Templates error: {e}")
+        # Fallback - return templates without pro status
+        return {
+            "status": "success",
+            "templates": templates,
+            "is_pro": False
+        }
 
 
 class Slide(BaseModel):
