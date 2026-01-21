@@ -356,6 +356,7 @@ async def get_user_status(request: Request):
     try:
         # Safe header extraction
         rc_user_id = request.headers.get("X-RC-App-User-ID") or None
+        client_user_id = request.headers.get("X-Client-User-ID") or None
 
         # Default response (true guest)
         response = {
@@ -389,7 +390,7 @@ async def get_user_status(request: Request):
                 return response
 
             # Free user count
-            used_count = r.get(f"guest:{rc_user_id}")
+            used_count = r.get(f"guest:{client_user_id}")
             used = int(used_count) if used_count else 0
             remaining = max(0, FREE_LIMIT - used)
 
