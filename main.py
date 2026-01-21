@@ -348,6 +348,81 @@ async def generate_pptx(request: SlidesRequest = Body(...), request_obj: Request
 #         print(f"generate_pptx error: {e}")
 #         return {"status": "error", "message": str(e)}
 
+@app.get("/api/user-status")
+async def get_user_status(request: Request):
+    """
+    Returns user subscription status and usage limits
+    """
+    try:
+        # Safe header extraction
+        rc_user_id = request.headers.get("X-RC-App-User-ID") or None
+
+        # Default response (true guest)
+        response = {
+            "status": "success",
+            "is_pro": False,
+            "free_limit": FREE_LIMIT,
+            "used": 0,
+            "remaining": FREE_LIMIT
+        }
+
+        # Early return for no RC_ID
+        if not rc_user_id:
+            return response
+
+        # Redis operations with exception safety
+        if r is None:
+            print("Redis unavailable - treating as new user")
+            return response
+
+        try:
+            # Pro check first (fast path)
+            pro_status = r.get(f"pro:{rc_user_id}")
+            if pro_status:
+                response.update({
+                    "is_pro": True,
+                    "free_limit": None,
+                    "used": None,
+                    "remaining": None
+                })
+                print(f"User status - Pro: {rc_user_id[:20]}")
+                return response
+
+            # Free user count
+            used_count = r.get(f"guest:{rc_user_id}")
+            used = int(used_count) if used_count else 0
+            remaining = max(0, FREE_LIMIT - used)
+
+            response.update({
+                "used": used,
+                "remaining": remaining
+            })
+            print(f"User status - Free: {rc_user_id[:20]}, {used}/3 used")
+
+        except (ValueError, TypeError) as e:
+            print(f"Redis data parse error: {e}, rc_user_id: {rc_user_id[:20]}")
+            # Corrupted data? Reset to safe defaults
+            response["used"] = 0
+            response["remaining"] = FREE_LIMIT
+
+        except Exception as redis_error:
+            print(f"Redis error: {redis_error}")
+            # Redis down? Fallback to defaults
+            pass
+
+        return response
+
+    except Exception as e:
+        print(f"User status critical error: {e}")
+        # Absolute fallback - never break frontend
+        return {
+            "status": "success",
+            "is_pro": False,
+            "free_limit": FREE_LIMIT,
+            "used": 0,
+            "remaining": FREE_LIMIT
+        }
+
 
 def generate_thumbnail(template_id: str) -> str:
     """Use your existing template thumbnails"""
