@@ -739,7 +739,7 @@ async def revenuecat_webhook(request: Request, payload: dict = Body(...)):
             print(f"TEST SUCCESS: {app_user_id}")
             return {"status": "test_success"}
 
-        elif event_type == ['INITIAL_PURCHASE', 'NON_RENEWING_PURCHASE']:
+        elif event_type == "INITIAL_PURCHASE":
             if not r.exists(pro_key):
                 if "lifetime" in product_id.lower() or "149" in product_id:
                     r.set(pro_key, "lifetime")
@@ -763,6 +763,10 @@ async def revenuecat_webhook(request: Request, payload: dict = Body(...)):
         elif event_type == "EXPIRATION":
             r.delete(pro_key)
             print(f"EXPIRED: {app_user_id}")
+
+        elif event_type == "NON_RENEWING_PURCHASE":
+            r.set(pro_key, "lifetime")
+            print(f"LIFETIME: {app_user_id}")
 
         elif event_type == "BILLING_ISSUE":
             print(f"Billing issue detected: {app_user_id}")
